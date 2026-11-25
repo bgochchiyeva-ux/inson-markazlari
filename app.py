@@ -1,212 +1,150 @@
-"""
-«Inson» markazlaridan kim uzoqda qolmoqda? — Streamlit ilovasi.
+"""«Inson» markazlari: kim xizmatdan uzoqda qolmoqda? — Streamlit ilovasi.
 
-Ishga tushirish:   streamlit run app.py
-Ma’lumot fayli:    data/ilova_data.gpkg  (bu app.py yonidagi "data" papkada turishi kerak)
+Ilova hisob-kitob qilmaydi: Colab'da tayyorlangan natijani (data/ilova_data.gpkg) koʻrsatadi.
 """
 from pathlib import Path
 
 import folium
 import geopandas as gpd
-import numpy as np
+import pandas as pd
 import streamlit as st
+from folium import GeoJson, GeoJsonTooltip, LayerControl
 from streamlit_folium import st_folium
 
-# ------------------------------------------------------------------
-# 1. Umumiy sozlamalar
-# ------------------------------------------------------------------
-st.set_page_config(page_title="«Inson» markazlari", layout="wide")
+st.set_page_config(page_title="«Inson» markazlari — kim uzoqda qolmoqda?", layout="wide")
 
-# Xarita sinflari: 0–10 / 10–25 / 25–50 / 50–75 / 75–100 %
-CHEGARALAR = [10, 25, 50, 75]
-# YlOrRd palitrasi (och sariqdan to to‘q qizilgacha, qizil–yashil emas)
-RANGLAR = ["#ffffb2", "#fecc5c", "#fd8d3c", "#f03b20", "#bd0026"]
-NOMLAR = ["0–10 %", "10–25 %", "25–50 %", "50–75 %", "75–100 %"]
+DATA = Path(__file__).parent / "data" / "ilova_data.gpkg"
+
+# Foiz sinflari va ketma-ket palitra (OrRd — qizil–yashil emas)
+CHEGARA = [10, 30, 60, 85]
+RANGLAR = ["#FEF0D9", "#FDCC8A", "#FC8D59", "#E34A33", "#B30000"]
+NOMLAR = ["0–10 %", "10–30 %", "30–60 %", "60–85 %", "85–100 %"]
 
 
-def son_yoz(x):
-    """Sonni o‘qish oson ko‘rinishda yozadi: 1234567 -> '1 234 567'."""
-    return f"{int(round(x)):,}".replace(",", " ")
-
-
-def birlashtir(geoseriya):
-    """Bir nechta geometriyani bittaga birlashtiradi (geopandas versiyasiga moslab)."""
-    if hasattr(geoseriya, "union_all"):
-        return geoseriya.union_all()
-    return geoseriya.unary_union
-
-
-# ------------------------------------------------------------------
-# 2. Ma’lumotni bir marta yuklash (keshlanadi)
-# ------------------------------------------------------------------
 @st.cache_data
 def yukla():
-    fayl = Path(__file__).parent / "data" / "ilova_data.gpkg"
-    natija = gpd.read_file(fayl, layer="natija")
-    obyektlar = gpd.read_file(fayl, layer="obyektlar")
+    """Maʼlumotni bir marta oʻqiydi."""
+    natija = gpd.read_file(DATA, layer="natija")
+    obyektlar = gpd.read_file(DATA, layer="obyektlar")
     return natija, obyektlar
+
+
+def sinf(p):
+    for i, b in enumerate(CHEGARA):
+        if p < b:
+            return i
+    return len(CHEGARA)
+
+
+def son(x):
+    return f"{x:,.0f}".replace(",", " ")
 
 
 natija, obyektlar = yukla()
 
-# ------------------------------------------------------------------
-# 3. Sarlavha va chap panel
-# ------------------------------------------------------------------
+# ---------- Chap panel ----------
+st.sidebar.header("Filtr")
+hududlar = ["Ikkalasi"] + sorted(natija["hudud"].dropna().unique().tolist())
+hudud = st.sidebar.selectbox("Hudud", hududlar)
+R = st.sidebar.slider("Masofa chegarasi (km)", min_value=1, max_value=10, value=5, step=1,
+                      help="«Inson» markazidan shu masofadan uzoqda yashovchi aholi hisoblanadi.")
+st.sidebar.caption("Masofa «Inson» markazigacha toʻgʻri chiziqda hisoblangan.")
+
+df = natija if hudud == "Ikkalasi" else natija[natija["hudud"] == hudud]
+ob = obyektlar if hudud == "Ikkalasi" else obyektlar[obyektlar["hudud"] == hudud]
+
+uzoq_a, uzoq_p = f"uzoq{R}_aholi", f"uzoq{R}_pct"
+
+# ---------- Sarlavha va raqamlar ----------
 st.title("«Inson» markazlaridan kim uzoqda qolmoqda?")
-st.caption("Tanlangan masofadan tashqarida, ya’ni «Inson» markazidan uzoqda yashaydigan aholi.")
+st.caption("Toshkent shahri va viloyati: markazdan tanlangan masofadan (1–10 km) uzoqda yashovchi aholi")
 
-st.sidebar.header("Tanlov")
-hudud = st.sidebar.radio("Hudud", ["Ikkalasi", "Toshkent shahri", "Toshkent viloyati"])
-masofa = st.sidebar.radio("Masofa chegarasi", ["3 km", "5 km"], index=1, horizontal=True)
-km = 3 if masofa == "3 km" else 5
-
-# Tanlangan masofaga mos ustun nomlari
-kol_aholi = f"uzoq{km}_aholi"
-kol_pct = f"uzoq{km}_pct"
-
-# ------------------------------------------------------------------
-# 4. Hudud bo‘yicha saralash
-# ------------------------------------------------------------------
-if hudud == "Ikkalasi":
-    f = natija.copy()
-    nuqtalar = obyektlar.copy()
-else:
-    f = natija[natija["hudud"] == hudud].copy()
-    # Faqat tanlangan hudud ichidagi markazlarni qoldiramiz
-    nuqtalar = obyektlar[obyektlar.intersects(birlashtir(f.geometry))].copy()
-
-if f.empty:
-    st.warning("Tanlangan hudud uchun ma’lumot topilmadi.")
-    st.stop()
-
-# ------------------------------------------------------------------
-# 5. Uchta asosiy raqam
-# ------------------------------------------------------------------
-markazlar_soni = int(f["markazlar"].sum())
-uzoq_aholi = float(f[kol_aholi].sum())
-jami_aholi = float(f["aholi"].sum())
-ulush = uzoq_aholi / jami_aholi * 100 if jami_aholi > 0 else 0.0
-
+jami = df["aholi"].sum()
+uzoq = df[uzoq_a].sum()
 c1, c2, c3 = st.columns(3)
-c1.metric("«Inson» markazlari soni", son_yoz(markazlar_soni))
-c2.metric(f"Uzoqdagi aholi ({km} km dan tashqarida)", son_yoz(uzoq_aholi))
-c3.metric("Uzoqdagi aholi ulushi", f"{ulush:.1f} %")
+c1.metric("«Inson» markazlari soni", int(df["markazlar"].sum()))
+c2.metric(f"{R} km dan uzoqdagi aholi", son(uzoq))
+c3.metric("Aholining ulushi", f"{(100 * uzoq / jami if jami else 0):.1f} %".replace(".", ","))
 
-# ------------------------------------------------------------------
-# 6. Xarita uchun ma’lumotni tayyorlash
-# ------------------------------------------------------------------
-xar = f[["nomi", "geometry"]].copy()
-xar["pct"] = f[kol_pct].fillna(0).round(2)
-xar["markaz_s"] = f["markazlar"].astype(int).astype(str)
-xar["aholi_s"] = f["aholi"].map(son_yoz)
-xar["uzoq_s"] = f[kol_aholi].map(son_yoz) + " (" + f[kol_pct].map(lambda v: f"{v:.1f}") + " %)"
+# ---------- Xarita ----------
+g = df[["nomi", "hudud", "aholi", "markazlar", uzoq_a, uzoq_p, "geometry"]].copy()
+g["rang"] = g[uzoq_p].apply(lambda p: RANGLAR[sinf(p)])
+g["aholi_s"] = g["aholi"].apply(son)
+g["uzoq_s"] = g[uzoq_a].apply(son)
+g["ulush_s"] = g[uzoq_p].round(1).astype(str).str.replace(".", ",", regex=False) + " %"
+g["mk"] = g["markazlar"].astype(int)
+g = g[["nomi", "aholi_s", "mk", "uzoq_s", "ulush_s", "rang", "geometry"]]
 
-# Har bir sinfda nechta tuman borligi (legenda uchun)
-sinf_soni = np.bincount(np.digitize(xar["pct"], CHEGARALAR), minlength=5)
+xmin, ymin, xmax, ymax = df.total_bounds
+m = folium.Map(tiles="OpenStreetMap")
+m.fit_bounds([[ymin, xmin], [ymax, xmax]])
 
-
-def rang_ber(p):
-    """Foizga qarab rang tanlaydi."""
-    return RANGLAR[int(np.digitize(p, CHEGARALAR))]
-
-
-# ------------------------------------------------------------------
-# 7. Xaritani qurish
-# ------------------------------------------------------------------
-minx, miny, maxx, maxy = xar.total_bounds
-xarita = folium.Map(location=[(miny + maxy) / 2, (minx + maxx) / 2], tiles=None, control_scale=True)
-xarita.fit_bounds([[miny, minx], [maxy, maxx]])
-
-# Fon: OpenStreetMap (zaxira sifatida Esri ham bor — panelda almashtiriladi)
-folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(xarita)
-folium.TileLayer(
-    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-    name="Esri ko‘cha xaritasi (zaxira)", attr="Tiles © Esri", max_zoom=18,
-).add_to(xarita)
-
-# Xoroplet: tumanlar uzoqdagi aholi ulushiga qarab bo‘yaladi
-folium.GeoJson(
-    xar,
-    name=f"Uzoqdagi aholi ulushi ({km} km)",
-    style_function=lambda x: {
-        "fillColor": rang_ber(x["properties"]["pct"]),
-        "color": "#ffffff", "weight": 0.8, "fillOpacity": 0.8,
-    },
-    highlight_function=lambda x: {"weight": 2.5, "color": "#000000", "fillOpacity": 0.9},
-    tooltip=folium.GeoJsonTooltip(
-        fields=["nomi", "markaz_s", "aholi_s", "uzoq_s"],
-        aliases=["Tuman:", "«Inson» markazlari:", "Aholi:", f"{km} km dan tashqarida:"],
-        sticky=True, localize=False,
+GeoJson(
+    g,
+    name=f"{R} km dan uzoqdagi aholi ulushi (%)",
+    style_function=lambda f: {"fillColor": f["properties"]["rang"], "color": "#FFFFFF", "weight": 0.8, "fillOpacity": 0.8},
+    highlight_function=lambda f: {"weight": 3, "color": "#000000"},
+    tooltip=GeoJsonTooltip(
+        fields=["nomi", "aholi_s", "mk", "uzoq_s", "ulush_s"],
+        aliases=["Tuman:", "Aholi:", "«Inson» markazlari:", f"{R} km dan uzoqda (kishi):", f"{R} km dan uzoqda (%):"],
+        sticky=True,
     ),
-).add_to(xarita)
+).add_to(m)
 
-# «Inson» markazlari — alohida qatlam (panelda yoqiladi/o‘chiriladi)
-markaz_qatlami = folium.FeatureGroup(name="«Inson» markazlari", show=True)
-for _, q in nuqtalar.iterrows():
+fg = folium.FeatureGroup(name="«Inson» markazlari")
+for _, row in ob.iterrows():
     folium.CircleMarker(
-        location=[q.geometry.y, q.geometry.x], radius=5,
-        color="#ffffff", weight=1, fill=True, fill_color="#08519c", fill_opacity=0.95,
-        tooltip=str(q["name"]),
-    ).add_to(markaz_qatlami)
-markaz_qatlami.add_to(xarita)
+        [row.geometry.y, row.geometry.x], radius=5, color="#08306b", weight=1,
+        fill=True, fill_color="#2171b5", fill_opacity=1, tooltip=str(row["name"]),
+    ).add_to(fg)
+fg.add_to(m)
 
-folium.LayerControl(collapsed=False).add_to(xarita)
-
-# O‘zbekcha legenda (har sinfda tumanlar soni bilan)
-qatorlar = "".join(
-    f'<div style="margin:2px 0"><span style="display:inline-block;width:18px;height:12px;'
-    f'background:{rang};border:1px solid #999;margin-right:6px"></span>{nom} — <b>{int(n)}</b> ta tuman</div>'
-    for rang, nom, n in zip(RANGLAR, NOMLAR, sinf_soni)
+satrlar = "".join(
+    f'<div><span style="background:{c};width:14px;height:14px;display:inline-block;margin-right:6px;border:1px solid #777"></span>{n}</div>'
+    for c, n in zip(RANGLAR, NOMLAR)
 )
-legenda = f"""
-<div style="position:fixed;bottom:30px;right:10px;z-index:9999;background:white;padding:10px 12px;
- border:1px solid #999;border-radius:6px;font:13px Arial,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.3)">
- <b>{km} km dan tashqaridagi<br>aholi ulushi (%)</b>
- <div style="margin-top:6px">{qatorlar}</div>
- <div style="margin-top:8px"><span style="display:inline-block;width:12px;height:12px;border-radius:50%;
- background:#08519c;border:1px solid #fff;margin-right:6px;box-shadow:0 0 0 1px #777"></span>«Inson» markazi</div>
-</div>"""
-xarita.get_root().html.add_child(folium.Element(legenda))
+m.get_root().html.add_child(folium.Element(
+    f'<div style="position:fixed;bottom:25px;left:25px;z-index:9999;background:white;padding:8px 10px;'
+    f'border:1px solid #888;border-radius:6px;font:12px Arial;line-height:1.5">'
+    f"<b>{R} km dan uzoqda yashovchi<br>aholi ulushi</b>{satrlar}</div>"
+))
+LayerControl(collapsed=False).add_to(m)
 
-# ------------------------------------------------------------------
-# 8. Xarita (chapda) va eng og‘ir 10 tuman jadvali (o‘ngda)
-# ------------------------------------------------------------------
-chap, ong = st.columns([3, 2])
+col_xarita, col_jadval = st.columns([3, 2])
+with col_xarita:
+    st_folium(m, height=560, use_container_width=True, returned_objects=[])
 
-with chap:
-    # returned_objects=[] — xaritani bosganda ilova qayta ishlamaydi, shuning uchun tez ishlaydi
-    st_folium(xarita, height=600, use_container_width=True, returned_objects=[])
+# ---------- Eng ogʻir 10 ta tuman ----------
+with col_jadval:
+    st.subheader(f"Eng ogʻir 10 ta tuman ({R} km)")
+    top = df.nlargest(10, uzoq_a)[["nomi", "hudud", "markazlar", uzoq_a, uzoq_p]].copy()
+    top[uzoq_a] = top[uzoq_a].round(0).astype(int)
+    top[uzoq_p] = top[uzoq_p].round(1)
+    top.columns = ["Tuman", "Hudud", "Markazlar soni", "Uzoqdagi aholi (kishi)", "Ulushi (%)"]
+    st.dataframe(top, hide_index=True, width="stretch")
+    st.caption("Tartib: uzoqda yashovchi aholining soni boʻyicha.")
 
-with ong:
-    st.subheader("Eng og‘ir 10 ta tuman")
-    st.caption(f"Uzoqdagi aholi ulushi ({km} km) bo‘yicha saralangan.")
-    jadval = (
-        f.sort_values(kol_pct, ascending=False)
-        .head(10)[["nomi", kol_pct, kol_aholi, "aholi", "markazlar"]]
-        .rename(columns={
-            "nomi": "Tuman",
-            kol_pct: "Uzoqdagi ulush, %",
-            kol_aholi: "Uzoqdagi aholi",
-            "aholi": "Jami aholi",
-            "markazlar": "Markazlar",
-        })
-    )
-    st.dataframe(
-        jadval, hide_index=True,
-        column_config={
-            "Uzoqdagi ulush, %": st.column_config.NumberColumn(format="%.1f"),
-            "Uzoqdagi aholi": st.column_config.NumberColumn(format="%d"),
-            "Jami aholi": st.column_config.NumberColumn(format="%d"),
-        },
-    )
+# ---------- Masofa egri chizigʻi ----------
+st.subheader("Masofa kengaygan sari uzoqda qolganlar qanday kamayadi?")
+egri = pd.DataFrame({
+    "Masofa (km)": list(range(1, 11)),
+    "Uzoqdagi aholi ulushi (%)": [round(100 * df[f"uzoq{k}_aholi"].sum() / jami, 1) if jami else 0 for k in range(1, 11)],
+    "Uzoqdagi aholi (kishi)": [int(df[f"uzoq{k}_aholi"].sum()) for k in range(1, 11)],
+})
+e1, e2 = st.columns([3, 2])
+with e1:
+    st.line_chart(egri, x="Masofa (km)", y="Uzoqdagi aholi ulushi (%)", height=300)
+with e2:
+    ko = egri.copy()
+    ko["Uzoqdagi aholi (kishi)"] = ko["Uzoqdagi aholi (kishi)"].apply(son)
+    st.dataframe(ko, hide_index=True, width="stretch", height=300)
+st.caption("Egri chiziq tanlangan hudud (chap panel) uchun; slayder faqat xarita va raqamlarni oʻzgartiradi.")
 
-# ------------------------------------------------------------------
-# 9. Manba va cheklovlar
-# ------------------------------------------------------------------
-st.divider()
-st.caption(
-    "**Manba:** loyiha ma’lumotlari — tuman chegaralari, «Inson» markazlari va 100 m aholi rastri.  \n"
-    "**Cheklov 1:** masofa markazdan to‘g‘ri chiziq bo‘yicha (3 yoki 5 km radius) olingan, yo‘l bo‘ylab emas.  \n"
-    "**Cheklov 2:** aholi soni rastrdan hisoblangan, shuning uchun rasmiy statistikadan biroz farq qilishi mumkin; "
-    "tuman chegaralari xarita uchun soddalashtirilgan."
+# ---------- Manba va cheklovlar ----------
+st.markdown("---")
+st.markdown(
+    "**Manba:** loyiha_toplami.gpkg (tuman chegaralari, «Inson» markazlari), aholi rastri 100 m, stat.uz.  \n"
+    "**Cheklovlar:** (1) masofa toʻgʻri chiziqda — yoʻl va transport hisobga olinmagan; "
+    "(2) aholi rastri barcha yoshni qamrab oladi, markazlarning sigʻimi hisobga olinmagan; "
+    "(3) bufer EPSG:32642 da qurilgan, xaritadagi chegaralar soddalashtirilgan."
 )
